@@ -5,6 +5,10 @@
         "types.h": "c",
         "string_view": "c",
         "locale.h": "c",
-        "sstream": "c"
+        "sstream": "c",
+        "algorithm": "c",
+        "array": "c",
+        "initializer_list": "c",
+        "utility": "c"
     }
 }

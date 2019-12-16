@@ -12,22 +12,16 @@
 #include <signal.h>
 #include <errno.h>
 
-// There are unicode characters which takes multiple column in terminal.
-// We can measure it by how many column it moves cursor after printing.
-// But reDrawing line every time cursor moves is easier
-// We can save cursor position in the middle of printing and load after drawing the whole line
-
-
-// Importants //
-// At line endings all functions maintain \n\r at console
-
 
 #define CAPACIY_INCREMENT 10
 
-#define DEBUG_ENABLED 1 // Enables or disables debug output globally
+#define DEBUG_ENABLED 0 // Enables or disables debug output globally
 
-#define JUST_ECHO 1 // If it is 1 just echos back command
+#define JUST_ECHO 0 // If it is 1 just echos back command
 
+#define ADJUST_CAPACITY(array, count, elementSize) \
+    if(count % CAPACIY_INCREMENT == 0 && count > 0) \
+        args = realloc(array, elementSize * (count + CAPACIY_INCREMENT));
 
 typedef struct{
     int line;
@@ -360,7 +354,7 @@ void loadFromHistory(shell_state *s, history_record *record){
         i++;
     }
     s->posSync = 0;
-    DEBUG_DUMP_STATE(s, "loadFromHistory_end")
+    DEBUG_DUMP_STATE(s, "loadFromHistory_end");
     /*s->curPos = s->length = printf("%s", record->command);
 
     if(s->curPos > s->capacity){
@@ -595,75 +589,178 @@ void commit(shell_state *s){
     s->history_pos = 0;
 }
 
-void executeCommand(char *command, int outputPipe[]){
-    char buffer[0];
-    char** args;
-    int i = 0;
-    int execResult;
+// Allocates new command string to command variable and returns array of pointers that points to locations in that string.
+char** parseCommand(char **command){
+    char ch; //temp to store character that currently being processsed.
+    int i = 0; // Position in old command string
+    int newI = 0; // Position in new command string
+    int process; // Stores whether character processed or not 
+    int argStart = -1; // Where the latest argument starts at new string
     int argCount = 0;
-    int attached = 0;
+    int argLength = 0;
+    char *oldStr = *command;
+    char escapes = 0;
+    char *newStr = malloc(sizeof(char)*(CAPACIY_INCREMENT + 3));
     int args_capacity = CAPACIY_INCREMENT;
-    args = malloc(sizeof(char*)*CAPACIY_INCREMENT);
-    while(command[i]){
-        if(command[i] != ' '){
-            if(!attached){
-                args[argCount++] = command+i;
-                attached = 1;
-            }   
-        }else{
-            if(attached){
-                command[i] = '\0';
-                attached = 0;
+    char** args = malloc(sizeof(char*)*(CAPACIY_INCREMENT+1));
+    while(oldStr[i]){
+        ch = oldStr[i];
+        ADJUST_CAPACITY(args, argCount+1, sizeof(char*));
+        ADJUST_CAPACITY(newStr, newI+3, sizeof(char*));
+
+        if(escapes){
+            process = 0;
+            if(escapes & 0x8){
+                escapes = escapes ^ 0x8;
+                process = 1;
+            }else if(escapes & 0x4){
+                if(ch == '\'') escapes = 0;
+                else process = 1;
+            }else{ 
+                if(ch == '\"') escapes = 0;
+                else process = 1;
             }
+            if(process){
+                if(argLength == 0) args[argCount++] = newStr+newI; 
+                newStr[newI++] = ch;
+                argLength++;
+            }
+            
+        }else{
+            switch (ch)
+            {
+            case '|':
+                if(argLength > 0){
+                    newStr[newI++] = '\0';
+                    argLength = 0;
+                }
+                args[argCount++] = newStr+newI;
+                newStr[newI++] = '|';
+                newStr[newI++] = '\0';
+                break;
+            case ' ':
+                if(argLength > 0){
+                    newStr[newI++] = '\0';
+                    argLength = 0;
+                }
+                break;
+            case '\\':
+                escapes = 0x8;
+                break;
+            case '\'':
+                escapes = 0x4;
+                break;
+            case '\"':
+                escapes = 0x2;
+                break;
+            default:
+                if(argLength == 0) args[argCount++] = newStr+newI;
+                newStr[newI++] = ch;
+                argLength++;
+                break;
+            }
+
+
         }
         i++;
     }
+    if(argLength > 0){
+        newStr[newI] = '\0';
+    }
+    i = 0;
+    while(args[i]) printf("%s\n\r", args[i++]);
+    *command = newStr;
     args[argCount] = 0;
+    return args;
+}
+
+// Executes command and returns a pipe
+int* executeCommand(char **args, int *inputPipe){
+    int execResult;
+    int pid;
+    int pipeOperator = 0;
+    int *outputPipe = malloc(sizeof(int)*2);
+    if (pipe(outputPipe)==-1) printf("Pipe Error!\n\r");
+
+    while(args[pipeOperator] && !(args[pipeOperator][0] == '|' && args[pipeOperator][1] == '\0' ) ) pipeOperator++;
+    if(args[pipeOperator] == NULL)
+        pipeOperator = 0;
+
+    pid = fork();
+    if(pid == -1){
+        printf("Fork Error!\n\r");
+        free(outputPipe);
+        return NULL;
+    }else if(pid != 0){
+        //parent
+        if(pipeOperator)
+            return executeCommand(args+pipeOperator+1, outputPipe);
+        else
+            return outputPipe;
+            
+    }
+    //child
+    //Check if there is a pipe operator
+    if(pipeOperator) args[pipeOperator] = NULL;
+    if(inputPipe){
+        wait(NULL);
+        close(inputPipe[1]);
+        dup2(inputPipe[0], STDIN_FILENO);
+    }
     dup2(outputPipe[1], STDOUT_FILENO);
     dup2(outputPipe[1], STDERR_FILENO);
     execResult = execvp(args[0], args);
     if(execResult < 0) printf("Error: %s!", strerror(errno));
     close(outputPipe[1]);
+    exit(1);
 }
 
 void runCommand(char *command){
     pid_t pid;
-    int outputPipe[2]; // 0>Reading 1>Writing
+    int *outputPipe; // 0>Reading 1>Writing
     char *output;
     int result, i;
-
+    char *tempCommandStr = command;
+    char **args = parseCommand(&tempCommandStr);
     #if JUST_ECHO
         //printf("\n\r");
         dumbPrint(command);
         return;
     #endif
-    if (pipe(outputPipe)==-1) printf("Pipe Error!\n\r");
 
-    pid = fork();
-    if(pid == -1){
-        printf("Fork Error!\n\r");
-    }else if(pid == 0){ // Child
-        close(outputPipe[0]);
-        executeCommand(command, outputPipe);
-        exit(0);
-    }else{ //Parent process:
-        wait(NULL);
-        close(outputPipe[1]);
-        output = malloc(sizeof(char)*CAPACIY_INCREMENT);
-        i = 0;
-        while( ( result = read(outputPipe[0], output+i, CAPACIY_INCREMENT) ) > 0){
-            i += result;
-            output = realloc(output, sizeof(char) * (i+CAPACIY_INCREMENT));
+    if(strcmp(args[0], "cd") == 0){
+        if(args[1] == NULL) return;
+        if(chdir(args[1]) < 0){
+            printf("Error: %s!", strerror(errno));
         }
-        output[i] = '\0';
-        i = 0;
-        //printf("\n\r");
-        while(output[i]){
-            putchar(output[i]);
-            if(output[i] == '\n' && output[i+1] != '\r') putchar('\r');
-            i++;
-        }
+        return;
     }
+
+    outputPipe = executeCommand(args, NULL);
+    if(outputPipe == NULL){
+        printf("Execution Error!\n\r");
+        return;
+    }
+
+    wait(NULL);
+    close(outputPipe[1]);
+    output = malloc(sizeof(char)*CAPACIY_INCREMENT);
+    i = 0;
+    while( ( result = read(outputPipe[0], output+i, CAPACIY_INCREMENT) ) > 0){
+        i += result;
+        output = realloc(output, sizeof(char) * (i+CAPACIY_INCREMENT));
+    }
+    output[i] = '\0';
+    i = 0;
+    //printf("\n\r");
+    while(output[i]){
+        putchar(output[i]);
+        if(output[i] == '\n' && output[i+1] != '\r') putchar('\r');
+        i++;
+    }
+    free(tempCommandStr);
+    free(args);
+    free(outputPipe);
 }
 
 
