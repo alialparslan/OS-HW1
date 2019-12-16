@@ -16,13 +16,13 @@
 
 #define CAPACIY_INCREMENT 10
 
-#define DEBUG_ENABLED 0 // Enables or disables debug output globally
+#define DEBUG_ENABLED 1 // Enables or disables debug output globally
 
 #define JUST_ECHO 0 // If it is 1 just echos back command
 
-#define ADJUST_CAPACITY(array, count, elementSize) \
-    if(count % CAPACIY_INCREMENT == 0 && count > 0) \
-        args = realloc(array, elementSize * (count + CAPACIY_INCREMENT));
+#define ADJUST_CAPACITY(array, count, minFree ,elementSize) \
+    if( (count+minFree) % CAPACIY_INCREMENT == 0) \
+        array = realloc(array, elementSize * (count + minFree + CAPACIY_INCREMENT));
 
 typedef struct{
     int line;
@@ -56,12 +56,14 @@ typedef struct{
     int width; // How much space in total characters use
     int lastCharStart; // Points to starting index of last char
     int expectedBytes; // How many bytes expected to complate multi byte char
-    wchar_t wideChar; 
+    wchar_t wideChar;
+
+    char escapes; // Stores escape status until curPos
 }shell_state;
 
 
 void runCommand(char *command);
-void addChar(shell_state *s, char ch);
+void addChar(char ch);
 
 
 #define HEXCHAR(char) char & 0xff
@@ -78,44 +80,46 @@ void addChar(shell_state *s, char ch);
 #define ESCAPES_CHECK_DOUBLE(var) var & 0x2
 #define ESCAPES_CLEAR_DOUBLE(var) var = var & 0xD
 
-
-#if DEBUG_ENABLED
-    FILE* debugFile;
-    void debugDumpState(shell_state* s){
-        int i = 0; 
-        fprintf(debugFile, "length: %d, curPos: %d, capacity: %d", s->length, s->curPos, s->capacity); 
-        fprintf(debugFile, ",terminalWidth: %d, curLine: %d, curColumn: %d", s->terminalWidth, s->curLine, s->curColumn);
-        if(s->draft){ 
-            fprintf(debugFile, "\nDraft: "); 
-            while(s->draft[i]){ 
-                if(i > 0) fprintf(debugFile, ","); 
-                fprintf(debugFile, "%X", s->draft[i] & 0xff); 
-                i++; 
-            } 
-        }else fprintf(debugFile, ", draft: 0"); 
-        fprintf(debugFile, "\nContent: "); 
-        for(i = 0; i < s->length; i++){ 
-            if(i > 0) fprintf(debugFile, ","); 
-            fprintf(debugFile, "%X", s->content[i] & 0xff); 
-            if((s->content[i] & 0xC0) == 0x80) fprintf(debugFile, "*");
-        } 
-        fprintf(debugFile, "\n\n");
-        fflush(debugFile);
-    }
-    #define DEBUG( ...) fprintf (debugFile, __VA_ARGS__)
-    #define DEBUG_DUMP_STATE(l, label) \
-        fprintf(debugFile, "State (%s):\n", label); \
-        debugDumpState(l);
-#else
-    #define DEBUG
-    #define DEBUG_DUMP_STATE
-#endif
-
 // Globals
 struct termios termios_config;
 int resizeOccured = 0;
 shell_state state;
 int isChild = 0;
+
+
+#if DEBUG_ENABLED
+    FILE* debugFile;
+    void debugDumpState(){
+        int i = 0; 
+        fprintf(debugFile, "length: %d, curPos: %d, capacity: %d", state.length, state.curPos, state.capacity); 
+        fprintf(debugFile, ",terminalWidth: %d, curLine: %d, curColumn: %d", state.terminalWidth, state.curLine, state.curColumn);
+        if(state.draft){ 
+            fprintf(debugFile, "\nDraft: "); 
+            while(state.draft[i]){ 
+                if(i > 0) fprintf(debugFile, ","); 
+                fprintf(debugFile, "%X", state.draft[i] & 0xff); 
+                i++; 
+            } 
+        }else fprintf(debugFile, ", draft: 0"); 
+        fprintf(debugFile, "\nContent: "); 
+        for(i = 0; i < state.length; i++){ 
+            if(i > 0) fprintf(debugFile, ","); 
+            fprintf(debugFile, "%X", state.content[i] & 0xff); 
+            if((state.content[i] & 0xC0) == 0x80) fprintf(debugFile, "*");
+        } 
+        fprintf(debugFile, "\n\n");
+        fflush(debugFile);
+    }
+    #define DEBUG( ...) fprintf (debugFile, __VA_ARGS__)
+    #define DEBUG_DUMP_STATE(label) \
+        fprintf(debugFile, "State (%s):\n", label); \
+        debugDumpState();
+#else
+    #define DEBUG
+    #define DEBUG_DUMP_STATE
+#endif
+
+
 
 void getCursorPosition(cursor_position *cp){
     char ch;
@@ -189,6 +193,8 @@ int getCharWidthAndSkip(char *string, int *i){
     return width;
 }
 
+
+
 // Until we are able to maintain valid cursor position after any operation this is needed.
 void updateCursorPos(shell_state *s){
     int line = 0; // Current line relative to beginning
@@ -239,7 +245,7 @@ void updateCursorPos(shell_state *s){
     }
     s->curLine = line;
     s->curColumn = column;
-    //DEBUG_DUMP_STATE(s, "updateCursorPos_end");
+    //DEBUG_DUMP_STATE("updateCursorPos_end");
     s->posSync = 1;
 }
 
@@ -308,7 +314,6 @@ void reloadLine(shell_state *s){
 }
 
 
-
 static inline void stateInit(){
     state.content = malloc(sizeof(char) * CAPACIY_INCREMENT);
     state.length = 0;
@@ -320,7 +325,7 @@ static inline void stateInit(){
     state.width = 0;
     state.expectedBytes = 0;
     state.lastCharStart = 0;
-
+    state.escapes = 0;
     state.curColumn = 3;
     state.curLine =0;
     state.posSync = 0;
@@ -353,11 +358,11 @@ void loadFromHistory(shell_state *s, history_record *record){
     s->length = 0;
     s->curPos = 0;
     while(record->command[i]){
-        addChar(s, record->command[i]);
+        addChar(record->command[i]);
         i++;
     }
     s->posSync = 0;
-    DEBUG_DUMP_STATE(s, "loadFromHistory_end");
+    DEBUG_DUMP_STATE("loadFromHistory_end");
     /*s->curPos = s->length = printf("%s", record->command);
 
     if(s->curPos > s->capacity){
@@ -401,95 +406,95 @@ void loadNext(shell_state *s){
 }
 
 //adds a char that starts at where curPos points
-void addChar(shell_state *s, char ch){
+void addChar(char ch){
     wchar_t wideChar;
     int i;
     int l;
     int width = 0;
     int continuationByte = 0;
-    if(s->length+4 > s->capacity){ //We may open space in the middle of string for multi byte sequence therefore length+3
-        s->capacity += CAPACIY_INCREMENT;
-        s->content = realloc(s->content, sizeof(char) * s->capacity );
+    if(state.length+4 > state.capacity){ //We may open space in the middle of string for multi byte sequence therefore length+3
+        state.capacity += CAPACIY_INCREMENT;
+        state.content = realloc(state.content, sizeof(char) * state.capacity );
     }
 
     if(ch & 0x80){
         if(ch & 0x40){
             #if DEBUG_ENABLED
-                if(s->expectedBytes > 0) DEBUG("This should never ever happen! addChar: expected char didn't received!\n");
+                if(state.expectedBytes > 0) DEBUG("This should never ever happen! addChar: expected char didn't received!\n");
             #endif
             //First byte of multi byte character
-            s->lastCharStart = s->curPos;
+            state.lastCharStart = state.curPos;
             if(ch & 0x20){
                 if(ch & 0x10){ // 4 btye
-                    s->expectedBytes = 3;
-                    s->wideChar = (ch & 0x0F)<<18;
+                    state.expectedBytes = 3;
+                    state.wideChar = (ch & 0x0F)<<18;
                 }else{ // 3 byte
-                    s->expectedBytes = 2;
-                    s->wideChar = (ch & 0x0F)<<12;
+                    state.expectedBytes = 2;
+                    state.wideChar = (ch & 0x0F)<<12;
                 }
             }else{
                 // 2 byte
-                s->expectedBytes = 1;
-                s->wideChar = (ch & 0x1F)<<6;
+                state.expectedBytes = 1;
+                state.wideChar = (ch & 0x1F)<<6;
             }
         }else{
             // Continuation byte
             continuationByte = 1;
-            s->wideChar += (ch & 0x3F)<<(--s->expectedBytes*6);
-            if(s->expectedBytes == 0){ //Multi byte sequence completed!
-                width = wcwidth(s->wideChar);
+            state.wideChar += (ch & 0x3F)<<(--state.expectedBytes*6);
+            if(state.expectedBytes == 0){ //Multi byte sequence completed!
+                width = wcwidth(state.wideChar);
             }
         }
     }else{ //Single byte
         #if DEBUG_ENABLED
-            if(s->expectedBytes > 0) DEBUG("This should never ever happen! addChar: expected char didn't received!\n");
+            if(state.expectedBytes > 0) DEBUG("This should never ever happen! addChar: expected char didn't received!\n");
         #endif
         width = wcwidth(ch);
     }
 
-    //if(!s->posSync) updateCursorPos(s);
-    DEBUG_DUMP_STATE(s, "addChar before if");
-    if(s->curPos == s->length){
-        s->content[s->curPos] = ch;
-        s->curPos++;
-        s->length++;
+    //if(!state.posSync) updateCursorPos(s);
+    DEBUG_DUMP_STATE("addChar before if");
+    if(state.curPos == state.length){
+        state.content[state.curPos] = ch;
+        state.curPos++;
+        state.length++;
         putchar(ch);
 
         if(width > 0){
-            s->curColumn += width;
-            if(s->curColumn == s->terminalWidth){
-                s->curColumn = 0;
-                s->curLine++;
+            state.curColumn += width;
+            if(state.curColumn == state.terminalWidth){
+                state.curColumn = 0;
+                state.curLine++;
                 printf("a\e[D\e[K");
-            }else if(s->curColumn > s->terminalWidth){
-                s->curColumn = width;
-                s->curLine++;
+            }else if(state.curColumn > state.terminalWidth){
+                state.curColumn = width;
+                state.curLine++;
             }
         }else if(ch == '\n'){
-            s->curLine++;
-            s->curColumn = 2;
+            state.curLine++;
+            state.curColumn = 2;
             printf("\r> ");
         }
     }else{
         //DEBUG("addChar curPos != length");
         if(continuationByte){
-            s->content[s->curPos] = ch;
-            s->curPos++;
-            s->length++;
-            if(s->expectedBytes == 0){
-                printLine(s);
+            state.content[state.curPos] = ch;
+            state.curPos++;
+            state.length++;
+            if(state.expectedBytes == 0){
+                printLine(&state);
             }
         }else{
-            clearLine(s);
-            l = 1 + s->expectedBytes;
-            for(i=s->length-1; i >= s->curPos; i--){
-                s->content[i+l] = s->content[i];
+            clearLine(&state);
+            l = 1 + state.expectedBytes;
+            for(i=state.length-1; i >= state.curPos; i--){
+                state.content[i+l] = state.content[i];
             }
-            s->content[s->curPos] = ch;
-            s->curPos++;
-            s->length++;
-            if(s->expectedBytes == 0){
-                printLine(s);
+            state.content[state.curPos] = ch;
+            state.curPos++;
+            state.length++;
+            if(state.expectedBytes == 0){
+                printLine(&state);
             }
         }
     }
@@ -520,6 +525,17 @@ void moveForward(shell_state *s){
     }
 }
 
+// moves curser to end
+void goToEnd(){
+    if(state.curPos < state.length){
+        clearLine(&state);
+        state.curPos = state.length;
+        printLine(&state);
+    }
+
+}
+
+
 
 void backspace(shell_state *s){
     int i, j, x, moveBack = 0;
@@ -541,7 +557,7 @@ void backspace(shell_state *s){
         }
         DEBUG("moving back %d\n", moveBack);
         //if(moveBack>0) printf("\033[%dD", moveBack);
-        DEBUG_DUMP_STATE(s,"Backspace end");
+        DEBUG_DUMP_STATE("Backspace end");
         printLine(s);
     }
 }
@@ -575,6 +591,7 @@ void commit(shell_state *s){
         }
         printf("\n\r");
         if(s->capacity == s->length || s->capacity/s->length > 1.04){
+            fflush(stdout);
             s->content = realloc(s->content, sizeof(char) * (s->length+1));
         }
         s->content[s->length] = '\0';
@@ -597,34 +614,35 @@ char** parseCommand(char **command){
     char ch; //temp to store character that currently being processsed.
     int i = 0; // Position in old command string
     int newI = 0; // Position in new command string
-    int process; // Stores whether character processed or not 
-    int argStart = -1; // Where the latest argument starts at new string
+    int add;
     int argCount = 0;
     int argLength = 0;
     char *oldStr = *command;
     char escapes = 0;
-    char *newStr = malloc(sizeof(char)*(CAPACIY_INCREMENT + 3));
-    int args_capacity = CAPACIY_INCREMENT;
-    char** args = malloc(sizeof(char*)*(CAPACIY_INCREMENT+1));
+    char *newStr = malloc(sizeof(char)*(CAPACIY_INCREMENT + 4));
+    char *argStarts = malloc(sizeof(char*)*(CAPACIY_INCREMENT+2));;
+    char** args; // = malloc(sizeof(char*)*(CAPACIY_INCREMENT+1));
+    
     while(oldStr[i]){
         ch = oldStr[i];
-        ADJUST_CAPACITY(args, argCount+1, sizeof(char*));
-        ADJUST_CAPACITY(newStr, newI+3, sizeof(char*));
+        
+        ADJUST_CAPACITY(argStarts, argCount, 2, sizeof(char*));
+        ADJUST_CAPACITY(newStr, newI, 4, sizeof(char*));
 
         if(escapes){
-            process = 0;
+            add = 0;
             if(escapes & 0x8){
                 escapes = escapes ^ 0x8;
-                process = 1;
+                add = 1;
             }else if(escapes & 0x4){
                 if(ch == '\'') escapes = 0;
-                else process = 1;
+                else add = 1;
             }else{ 
                 if(ch == '\"') escapes = 0;
-                else process = 1;
+                else add = 1;
             }
-            if(process){
-                if(argLength == 0) args[argCount++] = newStr+newI; 
+            if(add){
+                if(argLength == 0) argStarts[argCount++] = newI; 
                 newStr[newI++] = ch;
                 argLength++;
             }
@@ -636,7 +654,7 @@ char** parseCommand(char **command){
                     newStr[newI++] = '\0';
                     argLength = 0;
                 }
-                args[argCount++] = newStr+newI;
+                argStarts[argCount++] = newI;
                 newStr[newI++] = '|';
                 newStr[newI++] = '\0';
                 break;
@@ -656,7 +674,7 @@ char** parseCommand(char **command){
                 escapes = 0x2;
                 break;
             default:
-                if(argLength == 0) args[argCount++] = newStr+newI;
+                if(argLength == 0) argStarts[argCount++] = newI;
                 newStr[newI++] = ch;
                 argLength++;
                 break;
@@ -664,14 +682,24 @@ char** parseCommand(char **command){
         }
         i++;
     }
-
+    if(argCount == 0){
+        free(args);
+        free(newStr);
+        return NULL;
+    }
     if(argLength > 0) newStr[newI] = '\0';
+    args = malloc( sizeof(char*) * (argCount+1));
+    for(i = 0; i< argCount ; i++) args[i] = newStr+argStarts[i];
+    free(argStarts);
     args[argCount] = 0;
-    //i = 0;
-    //while(args[i]) printf("%s\n\r", args[i++]);
-    //printf("---\n\r");
+
+    /*printf("Comamnd: %s.\n\r", oldStr);
+    i = 0;
+    while(args[i]) printf("%s\n\r", args[i++]);
+    printf("---\n\r");*/
+
+
     *command = newStr;
-    
     return args;
 }
 
@@ -719,6 +747,7 @@ int* executeCommand(char **args, int *inputPipe){
     //Check if there is a pipe operator
     if(pipeOperator) args[pipeOperator] = NULL;
     if(inputPipe){
+        close(STDIN_FILENO);
         close(inputPipe[1]); // Close writing end of input pipe
         dup2(inputPipe[0], STDIN_FILENO);
         //close(inputPipe[0]);
@@ -727,13 +756,12 @@ int* executeCommand(char **args, int *inputPipe){
     }
     dup2(outputPipe[1], STDOUT_FILENO);
     dup2(outputPipe[1], STDERR_FILENO);
-    //close(outputPipe[1]);
     execResult = execvp(args[0], args);
     if(execResult < 0) printf("Error: %s!\n\r", strerror(errno));     
     fclose(stderr);
     fclose(stdout);
     fclose(stdin);
-    exit(1);
+    exit(0);
 }
 
 void runCommand(char *command){
@@ -749,6 +777,7 @@ void runCommand(char *command){
         return;
     #endif
 
+    if(args == NULL) return;
     if(strcmp(args[0], "cd") == 0){
         if(args[1] == NULL) return;
         if(chdir(args[1]) < 0){
@@ -840,7 +869,7 @@ int main(int argc, char *argv[]){
     system("clear");
     write(STDOUT_FILENO, "\x1b[2J", 4);
     reloadTerminalWidth(statePtr);
-    printf("Welcome To AlpCLI - Press CTRL-D to quit");
+    printf("Welcome to AlpShell - Press CTRL-D to quit");
     NEW_LINE(statePtr);
 
     sigemptyset(&sa.sa_mask);
@@ -903,6 +932,7 @@ int main(int argc, char *argv[]){
             switch (ch)
             {
                 case 3: // CTRL-C
+                    goToEnd();
                     state.length = 0;
                     state.curPos = 0;
                     state.curLine = 0;
@@ -915,8 +945,9 @@ int main(int argc, char *argv[]){
                     exit(1);
                     break;
                 case '\r': // Enter
+                    goToEnd();
                     if(escapes){
-                        addChar(statePtr, '\n');
+                        addChar('\n');
                     }else{
                         commit(statePtr);
                         NEW_LINE(statePtr);
@@ -947,7 +978,7 @@ int main(int argc, char *argv[]){
                     if(escapes == 0x2 || !escapes) escapes = escapes ^ 0x2;
                 default:
                     //printf("(%x)", ch& 0xFF);
-                    addChar(statePtr, ch);
+                    addChar(ch);
                     break;
             }
         }
