@@ -11,7 +11,8 @@
 #include <sys/wait.h> 
 #include <signal.h>
 #include <errno.h>
-
+#include <sys/stat.h> // open
+#include <fcntl.h> // open
 
 #define CAPACIY_INCREMENT 10
 
@@ -110,9 +111,11 @@ void addChar(shell_state *s, char ch);
     #define DEBUG_DUMP_STATE
 #endif
 
-
+// Globals
 struct termios termios_config;
 int resizeOccured = 0;
+shell_state state;
+int isChild = 0;
 
 void getCursorPosition(cursor_position *cp){
     char ch;
@@ -306,21 +309,21 @@ void reloadLine(shell_state *s){
 
 
 
-static inline void stateInit(shell_state *s){
-    s->content = malloc(sizeof(char) * CAPACIY_INCREMENT);
-    s->length = 0;
-    s->capacity = CAPACIY_INCREMENT;
-    s->curPos = 0;
-    s->history_pos = NULL;
-    s->history_last = NULL;
-    s->draft = 0;
-    s->width = 0;
-    s->expectedBytes = 0;
-    s->lastCharStart = 0;
+static inline void stateInit(){
+    state.content = malloc(sizeof(char) * CAPACIY_INCREMENT);
+    state.length = 0;
+    state.capacity = CAPACIY_INCREMENT;
+    state.curPos = 0;
+    state.history_pos = NULL;
+    state.history_last = NULL;
+    state.draft = 0;
+    state.width = 0;
+    state.expectedBytes = 0;
+    state.lastCharStart = 0;
 
-    s->curColumn = 3;
-    s->curLine =0;
-    s->posSync = 0;
+    state.curColumn = 3;
+    state.curLine =0;
+    state.posSync = 0;
 }
 
 
@@ -625,7 +628,6 @@ char** parseCommand(char **command){
                 newStr[newI++] = ch;
                 argLength++;
             }
-            
         }else{
             switch (ch)
             {
@@ -659,18 +661,17 @@ char** parseCommand(char **command){
                 argLength++;
                 break;
             }
-
-
         }
         i++;
     }
-    if(argLength > 0){
-        newStr[newI] = '\0';
-    }
-    i = 0;
-    while(args[i]) printf("%s\n\r", args[i++]);
-    *command = newStr;
+
+    if(argLength > 0) newStr[newI] = '\0';
     args[argCount] = 0;
+    //i = 0;
+    //while(args[i]) printf("%s\n\r", args[i++]);
+    //printf("---\n\r");
+    *command = newStr;
+    
     return args;
 }
 
@@ -679,46 +680,66 @@ int* executeCommand(char **args, int *inputPipe){
     int execResult;
     int pid;
     int pipeOperator = 0;
+    int saveStdOut, saveStdIn;
     int *outputPipe = malloc(sizeof(int)*2);
-    if (pipe(outputPipe)==-1) printf("Pipe Error!\n\r");
+    if (pipe(outputPipe)==-1){
+        printf("Pipe Error!\n\r");
+        exit(1);
+    }
 
     while(args[pipeOperator] && !(args[pipeOperator][0] == '|' && args[pipeOperator][1] == '\0' ) ) pipeOperator++;
     if(args[pipeOperator] == NULL)
         pipeOperator = 0;
-
+    saveStdOut = dup(STDOUT_FILENO);
+    saveStdIn = dup(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDIN_FILENO);
     pid = fork();
-    if(pid == -1){
+    if(pid < 0){
         printf("Fork Error!\n\r");
         free(outputPipe);
         return NULL;
-    }else if(pid != 0){
+    }
+    if(pid > 0){
+        dup2(saveStdOut, STDOUT_FILENO);
+        dup2(saveStdIn, STDIN_FILENO);
+        close(saveStdOut);
+        close(saveStdIn);
         //parent
-        if(pipeOperator)
+        if(pipeOperator){
             return executeCommand(args+pipeOperator+1, outputPipe);
-        else
+        }else
             return outputPipe;
             
     }
+    isChild = 1;
+
+    close(outputPipe[0]); // Close reading end of output pipe
     //child
     //Check if there is a pipe operator
     if(pipeOperator) args[pipeOperator] = NULL;
     if(inputPipe){
-        wait(NULL);
-        close(inputPipe[1]);
+        close(inputPipe[1]); // Close writing end of input pipe
         dup2(inputPipe[0], STDIN_FILENO);
+        //close(inputPipe[0]);
+    }else{
+        dup2(open("/dev/null", O_WRONLY), STDIN_FILENO);
     }
     dup2(outputPipe[1], STDOUT_FILENO);
     dup2(outputPipe[1], STDERR_FILENO);
+    //close(outputPipe[1]);
     execResult = execvp(args[0], args);
-    if(execResult < 0) printf("Error: %s!", strerror(errno));
-    close(outputPipe[1]);
+    if(execResult < 0) printf("Error: %s!\n\r", strerror(errno));     
+    fclose(stderr);
+    fclose(stdout);
+    fclose(stdin);
     exit(1);
 }
 
 void runCommand(char *command){
     pid_t pid;
+    char buffer[11];
     int *outputPipe; // 0>Reading 1>Writing
-    char *output;
     int result, i;
     char *tempCommandStr = command;
     char **args = parseCommand(&tempCommandStr);
@@ -741,32 +762,21 @@ void runCommand(char *command){
         printf("Execution Error!\n\r");
         return;
     }
-
-    wait(NULL);
     close(outputPipe[1]);
-    output = malloc(sizeof(char)*CAPACIY_INCREMENT);
-    i = 0;
-    while( ( result = read(outputPipe[0], output+i, CAPACIY_INCREMENT) ) > 0){
-        i += result;
-        output = realloc(output, sizeof(char) * (i+CAPACIY_INCREMENT));
+    
+    while( ( result = read(outputPipe[0], buffer, 10) ) > 0){
+        for(i = 0; i < result; i++){
+            if(buffer[i] == '\n' && buffer[i+1] != '\r') putchar('\r');
+            putchar(buffer[i]);
+        }
+        //fflush(stdout);
     }
-    output[i] = '\0';
-    i = 0;
-    //printf("\n\r");
-    while(output[i]){
-        putchar(output[i]);
-        if(output[i] == '\n' && output[i+1] != '\r') putchar('\r');
-        i++;
-    }
+    wait(NULL);
     free(tempCommandStr);
     free(args);
     free(outputPipe);
 }
 
-
-void disableRawMode(){
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_config);
-}
 
 void enableRawMode(){
     tcgetattr(STDIN_FILENO, &termios_config);
@@ -782,33 +792,50 @@ void enableRawMode(){
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
+
+// Function to be registered to run when terminal windows got resized.
 void resizeEventHandler(int signal){
     resizeOccured = 1;
 }
 
+void runAtExit(){
+    if(isChild) return; // Only main process should run this at exit
+    system("clear");
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_config);
+    free(state.content);
+    if(state.draft) free(state.draft);
+    while(state.history_last){
+        state.history_pos = state.history_last;
+        state.history_last = state.history_last->older;
+        free(state.history_pos->command);
+        free(state.history_pos);
+    }
+    #if DEBUG_ENABLED
+        fclose(debugFile);
+    #endif
+}
+
 int main(int argc, char *argv[]){
-    struct sigaction sa;
-    char** history;
-    int historyCapacity;
-    int historyI = 0;
-    char buffer[150];
-    int i = 0;
-    int quote = 0;
+    struct sigaction sa; // struct for registration for resize signal
     char escapes = 0;
-    int escapeSequence = 0;
+    int escapeSequence = 0; // Stores the state of escape sequence
     char ch;
-    int control = 1;
     int processed = 0;
-    setlocale (LC_ALL,"");
+    
+    setlocale (LC_ALL,""); //Sets all locales to system default
+    
     #if DEBUG_ENABLED
         debugFile = fopen("debug.txt", "w+");
     #endif
-    shell_state state;
-    shell_state *statePtr = &state;
-    stateInit(statePtr);
 
-    //system("stty raw");
-    //system("stty -echo");
+    shell_state *statePtr = &state;
+    stateInit();
+
+    if( atexit(runAtExit) != 0){
+        printf("Failed to register exit function!\n");
+        exit(1);
+    }
+
     enableRawMode();
     system("clear");
     write(STDOUT_FILENO, "\x1b[2J", 4);
@@ -821,7 +848,8 @@ int main(int argc, char *argv[]){
     sa.sa_handler = resizeEventHandler;
     if(sigaction(SIGWINCH, &sa, NULL) == -1) printf("Error when setting up SIGWINCH signal handler!\n\r");
 
-    while(control){
+
+    while(1){
         ch = getchar();
         if(ch == EOF) continue; // Signal handler prints EOF to stdin.
         processed = 0;
@@ -884,7 +912,7 @@ int main(int argc, char *argv[]){
                     NEW_LINE(statePtr);
                     break;
                 case 4: // CTRL-D
-                    control = 0;
+                    exit(1);
                     break;
                 case '\r': // Enter
                     if(escapes){
@@ -926,7 +954,7 @@ int main(int argc, char *argv[]){
         if(ch != '\\') ESCAPES_CLEAR_BACKSPACE(escapes);
         
 
-        //We need to do this here t avoid inturrupting multibyte char sequences
+        //We need to do this here to avoid inturrupting multibyte char sequences
         if(resizeOccured && !state.expectedBytes){
             reloadTerminalWidth(statePtr);
             //reloadLine(statePtr);
@@ -934,21 +962,4 @@ int main(int argc, char *argv[]){
         }
     }
 
-    printf("\n\r");
-    system("clear");
-    disableRawMode();
-    
-    free(state.content);
-    if(state.draft) free(state.draft);
-    while(state.history_last){
-        state.history_pos = state.history_last;
-        state.history_last = state.history_last->older;
-        free(state.history_pos->command);
-        free(state.history_pos);
-    }
-    #if DEBUG_ENABLED
-        fclose(debugFile);
-    #endif
-    //system("stty echo");
-    //system("stty cooked");
 }
