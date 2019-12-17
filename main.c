@@ -741,7 +741,6 @@ int* executeCommand(char **args, int *inputPipe){
             
     }
     isChild = 1;
-
     close(outputPipe[0]); // Close reading end of output pipe
     //child
     //Check if there is a pipe operator
