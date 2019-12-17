@@ -11,6 +11,7 @@
         "initializer_list": "c",
         "utility": "c",
         "stat.h": "c",
-        "wait.h": "c"
+        "wait.h": "c",
+        "fcntl.h": "c"
     }
 }

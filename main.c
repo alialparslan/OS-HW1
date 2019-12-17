@@ -16,7 +16,7 @@
 
 #define CAPACIY_INCREMENT 10
 
-#define DEBUG_ENABLED 1 // Enables or disables debug output globally
+#define DEBUG_ENABLED 0 // Enables or disables debug output globally
 
 #define JUST_ECHO 0 // If it is 1 just echos back command
 
@@ -58,7 +58,6 @@ typedef struct{
     int expectedBytes; // How many bytes expected to complate multi byte char
     wchar_t wideChar;
 
-    char escapes; // Stores escape status until curPos
     int startingColumn; // Stores the length of prefix (<> )
 }shell_state;
 
@@ -414,7 +413,6 @@ void addChar(char ch){
         width = wcwidth(ch);
     }
 
-    //if(!state.posSync) updateCursorPos(s);
     DEBUG_DUMP_STATE("addChar before if");
     if(state.curPos == state.length){
         state.content[state.curPos] = ch;
@@ -654,6 +652,41 @@ char** parseCommand(char **command){
     return args;
 }
 
+// Checks if there is an open escape in current command, return 1 for nonclosed escape, returns 0 if all escapes are finished
+char getEscapeStatus(){
+    char ch;
+    int i;
+    char escapes = 0;
+    
+    for(i = 0; i < state.length; i++){
+        ch = state.content[i];
+
+        if(escapes){
+            if(escapes & 0x8){
+                escapes = escapes ^ 0x8;
+            }else if(escapes & 0x4){
+                if(ch == '\'') escapes = 0;
+            }else{ 
+                if(ch == '\"') escapes = 0;
+            }
+        }else{
+            switch (ch)
+            {
+            case '\\':
+                escapes = 0x8;
+                break;
+            case '\'':
+                escapes = 0x4;
+                break;
+            case '\"':
+                escapes = 0x2;
+                break;
+            }
+        }
+    }
+    return escapes;
+}
+
 // Executes command and returns a pipe
 int* executeCommand(char **args, int *inputPipe){
     int execResult;
@@ -803,6 +836,7 @@ void runAtExit(){
         fclose(debugFile);
     #endif
 }
+
 static inline void stateInit(int startingColumn){
     state.content = malloc(sizeof(char) * CAPACIY_INCREMENT);
     state.length = 0;
@@ -814,7 +848,6 @@ static inline void stateInit(int startingColumn){
     state.width = 0;
     state.expectedBytes = 0;
     state.lastCharStart = 0;
-    state.escapes = 0;
     state.startingColumn = startingColumn;
     state.curColumn = startingColumn;
     state.curLine =0;
@@ -823,7 +856,6 @@ static inline void stateInit(int startingColumn){
 
 int main(int argc, char *argv[]){
     struct sigaction sa; // struct for registration for resize signal
-    char escapes = 0;
     int escapeSequence = 0; // Stores the state of escape sequence
     char ch;
     int processed = 0;
@@ -922,7 +954,7 @@ int main(int argc, char *argv[]){
                     break;
                 case '\r': // Enter
                     goToEnd();
-                    if(escapes){
+                    if(getEscapeStatus()){
                         addChar('\n');
                     }else{
                         commit();
@@ -943,23 +975,8 @@ int main(int argc, char *argv[]){
 
 
         if(processed == 0){
-            processed = 1;
-            switch (ch)
-            {
-                case '\\':
-                    escapes = escapes ^ 0x8;
-                case '\'':
-                    if(escapes == 0x4 || !escapes) escapes = escapes ^ 0x4;
-                case '\"':
-                    if(escapes == 0x2 || !escapes) escapes = escapes ^ 0x2;
-                default:
-                    //printf("(%x)", ch& 0xFF);
-                    addChar(ch);
-                    break;
-            }
-        }
-        if(ch != '\\') ESCAPES_CLEAR_BACKSPACE(escapes);
-        
+            addChar(ch);
+        }        
 
         //We need to do this here to avoid inturrupting multibyte char sequences
         if(resizeOccured && !state.expectedBytes){
