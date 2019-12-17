@@ -65,6 +65,8 @@ typedef struct{
 
 void runCommand(char *command);
 void addChar(char ch);
+void enableRawMode();
+void disableRawMode();
 
 
 #define HEXCHAR(char) char & 0xff
@@ -126,17 +128,16 @@ void getCursorPosition(cursor_position *cp){
     cp->line=0;
     cp->column=0;
     printf("\e[6n");
-    while(getchar() != '\e'); // One shouldn't do this
+    while(getchar() != '\e');
     getchar();
     while((ch = getchar()) != ';') cp->line = (ch-48) + cp->line*10;
     while((ch = getchar()) != 'R') cp->column = (ch-48) + cp->column*10;
 }
 
 char* makeStr(char* string, int length){
-    DEBUG("makestr length:%d \n", length);
     char* new = malloc(sizeof(char) * (length+1));
     memcpy(new, string, length);
-    string[length] = '\0';
+    new[length] = '\0';
     return new;
 }
 
@@ -249,14 +250,9 @@ void updateCursorPos(){
 }
 
 //Just clears terminal does not change command in memory. printLine should be called after changes made in command
-void clearLine(){
-    // If curPos smaller then terminalWidth we are in first line for sure, so no need to go up or any calculation for that
-    if(state.curPos+6 > state.terminalWidth){ 
-        if(!state.posSync) updateCursorPos();
-        if(state.curLine > 0) printf("\e[%dA", state.curLine);  
-    }else{
-        DEBUG("clearLine_else: curPos < terminalWidth\n");
-    }
+void clearLine(){    
+    if(!state.posSync) updateCursorPos();
+    if(state.curLine > 0) printf("\e[%dA", state.curLine);  
     printf("\e[999D\e[J<> ");
 }
 
@@ -266,37 +262,39 @@ void printLine(){
     int l;
     int width;
     state.curLine = 0;
-    state.curColumn = 3;
+    state.curColumn = state.startingColumn;
     if(state.length > 0){
         for(i = 0; i < state.curPos;){ // Since we need column and line until curPos, this loop goes until curPos
             l = i;
-            width = getCharWidthAndSkip(state.content+i, &i);
-            if(state.content[l] == '\n'){
+            if( state.content[l] == '\n'){
                 state.curLine++;
+                i++;
                 state.curColumn = 2;
                 printf("\n\r> ");
             }else{
+                width = getCharWidthAndSkip(state.content+i, &i);
                 while(l < i) putchar(state.content[l++]);
-            }
-            
-            
-            state.curColumn += width;
-            if(state.curColumn >= state.terminalWidth){
-                if(state.curColumn == state.terminalWidth){
-                    state.curColumn = 0;
-                    state.curLine++;
-                    printf("a\e[D\e[K");
-                }else{
-                    state.curColumn = width;
-                    state.curLine++;
+                state.curColumn += width;
+                if(state.curColumn >= state.terminalWidth){
+                    if(state.curColumn == state.terminalWidth){
+                        state.curColumn = 0;
+                        state.curLine++;
+                        printf("a\e[D\e[K");
+                    }else{
+                        state.curColumn = width;
+                        state.curLine++;
+                    }
                 }
-                
             }
+
         }
 
         if(i < state.length){ // If there is string after curPos
             printf("\e7");
-            for(; i < state.length;i++) putchar(state.content[i]);
+            for(; i < state.length;i++){
+                putchar(state.content[i]);
+                if(state.content[i] == '\n') printf("\r> ");
+            }
             if(state.curPos != state.length) printf("\e8");
         }
 
@@ -304,13 +302,6 @@ void printLine(){
     state.posSync = 1;
 }
 
-// Maybe proper way is printing whole screen from beginning.
-// curPos has to point first byte of multi byte characters in order to this func work properly.
-void reloadLine(){
-    state.posSync = 0;
-    clearLine();
-    printLine();
-}
 
 void historyAdd(char *command){
     history_record *record = malloc(sizeof(history_record));
@@ -328,7 +319,7 @@ void loadFromHistory(history_record *record){
     if(state.length > 0){
         if(state.history_pos == NULL){
             state.draft = makeStr(state.content, state.length);
-            DEBUG("loadFromHistory: Content saved as draft.\n");    
+            DEBUG("loadFromHistory: Content saved as draft. (%s) length: %d\n", state.draft, state.length);    
         }
         clearLine();
     }
@@ -343,15 +334,6 @@ void loadFromHistory(history_record *record){
     }
     state.posSync = 0;
     DEBUG_DUMP_STATE("loadFromHistory_end");
-    /*s->curPos = state.length = printf("%s", record->command);
-
-    if(state.curPos > state.capacity){
-        free(state.content);
-        state.content = malloc(sizeof(char)*s->length);
-    }
-    memcpy(state.content, record->command, state.length);
-    
-    state.posSync = 0;*/
 }
 
 void loadPrevious(){
@@ -462,7 +444,7 @@ void addChar(char ch){
             state.curPos++;
             state.length++;
             if(state.expectedBytes == 0){
-                printLine(&state);
+                printLine();
             }
         }else{
             clearLine(&state);
@@ -474,7 +456,7 @@ void addChar(char ch){
             state.curPos++;
             state.length++;
             if(state.expectedBytes == 0){
-                printLine(&state);
+                printLine();
             }
         }
     }
@@ -484,16 +466,16 @@ void addChar(char ch){
 // So regardless of length of char first we decrease curPos by one
 // Then we check if we have stepped over a multibyte char and decrease until curPos points first byte of character
 void moveBackward(){
-    //updateCursorPos(s);
     if(state.curPos > 0){
+        DEBUG_DUMP_STATE("moveBackward start");
         clearLine();
         while((state.content[--state.curPos] & 0xC0) == 0x80);
         printLine();
+        DEBUG_DUMP_STATE("moveBackward end");
     }
 }
 
 void moveForward(){
-    //updateCursorPos(s);
     if(state.curPos < state.length){
         clearLine();
         state.curPos++;
@@ -631,8 +613,8 @@ char** parseCommand(char **command){
                     argLength = 0;
                 }
                 argStarts[argCount++] = newI;
-                newStr[newI++] = '|';
-                newStr[newI++] = '\0';
+                //newStr[newI++] = '|';
+                newStr[newI++] = '\0'; //Empty string means pipe
                 break;
             case ' ':
                 if(argLength > 0){
@@ -668,13 +650,6 @@ char** parseCommand(char **command){
     for(i = 0; i< argCount ; i++) args[i] = newStr+argStarts[i];
     free(argStarts);
     args[argCount] = 0;
-
-    /*printf("Comamnd: %s.\n\r", oldStr);
-    i = 0;
-    while(args[i]) printf("%s\n\r", args[i++]);
-    printf("---\n\r");*/
-
-
     *command = newStr;
     return args;
 }
@@ -684,20 +659,18 @@ int* executeCommand(char **args, int *inputPipe){
     int execResult;
     int pid;
     int pipeOperator = 0;
-    int saveStdOut, saveStdIn;
+    
     int *outputPipe = malloc(sizeof(int)*2);
     if (pipe(outputPipe)==-1){
         printf("Pipe Error!\n\r");
         exit(1);
     }
 
-    while(args[pipeOperator] && !(args[pipeOperator][0] == '|' && args[pipeOperator][1] == '\0' ) ) pipeOperator++;
+    while(args[pipeOperator] && !(args[pipeOperator][0] == '\0') ) pipeOperator++;
     if(args[pipeOperator] == NULL)
         pipeOperator = 0;
-    saveStdOut = dup(STDOUT_FILENO);
-    saveStdIn = dup(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDIN_FILENO);
+    
+    
     pid = fork();
     if(pid < 0){
         printf("Fork Error!\n\r");
@@ -705,12 +678,12 @@ int* executeCommand(char **args, int *inputPipe){
         return NULL;
     }
     if(pid > 0){
-        dup2(saveStdOut, STDOUT_FILENO);
-        dup2(saveStdIn, STDIN_FILENO);
-        close(saveStdOut);
-        close(saveStdIn);
         //parent
         if(pipeOperator){
+            //In this case outputPipe will be used between childs so this process (parent) has no business with it
+            //But if we close both end pipe will be closed so we let read end open and close write end
+            //We have to close writing end otherwise child which reads it may hang forever.
+            close(outputPipe[1]);
             return executeCommand(args+pipeOperator+1, outputPipe);
         }else
             return outputPipe;
@@ -723,12 +696,12 @@ int* executeCommand(char **args, int *inputPipe){
     if(pipeOperator) args[pipeOperator] = NULL;
     if(inputPipe){
         close(STDIN_FILENO);
-        //close(inputPipe[1]); // Close writing end of input pipe
+        close(inputPipe[1]); // Close writing end of input pipe
         dup2(inputPipe[0], STDIN_FILENO);
         //close(inputPipe[0]);
-    }else{
-        dup2(open("/dev/null", O_WRONLY), STDIN_FILENO);
     }
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stdin, NULL, _IONBF, 0);
     dup2(outputPipe[1], STDOUT_FILENO);
     dup2(outputPipe[1], STDERR_FILENO);
     execResult = execvp(args[0], args);
@@ -742,7 +715,9 @@ int* executeCommand(char **args, int *inputPipe){
 }
 
 void runCommand(char *command){
+    int saveStdIn;
     pid_t pid;
+    char lastch = 0;
     char buffer[11];
     int *outputPipe; // 0>Reading 1>Writing
     int result, i;
@@ -762,22 +737,27 @@ void runCommand(char *command){
         }
         return;
     }
-
+    disableRawMode();
+    saveStdIn = dup(STDIN_FILENO);
+    
     outputPipe = executeCommand(args, NULL);
     if(outputPipe == NULL){
         printf("Execution Error!\n\r");
+        dup2(saveStdIn, STDIN_FILENO);
+        enableRawMode();
         return;
     }
     close(outputPipe[1]);
     
     while( ( result = read(outputPipe[0], buffer, 10) ) > 0){
         for(i = 0; i < result; i++){
-            if(buffer[i] == '\n' && buffer[i+1] != '\r') putchar('\r');
             putchar(buffer[i]);
         }
-        //fflush(stdout);
+        fflush(stdout);
     }
     wait(NULL);
+    dup2(saveStdIn, STDIN_FILENO);
+    enableRawMode();
     free(tempCommandStr);
     free(args);
     free(outputPipe);
@@ -797,17 +777,20 @@ void enableRawMode(){
     raw.c_oflag &= ~(OPOST);
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
-
+void disableRawMode(){
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_config);
+}
 
 // Function to be registered to run when terminal windows got resized.
 void resizeEventHandler(int signal){
     resizeOccured = 1;
 }
 
+
 void runAtExit(){
     if(isChild) return; // Only main process should run this at exit
     system("clear");
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_config);
+    disableRawMode();
     free(state.content);
     if(state.draft) free(state.draft);
     while(state.history_last){
