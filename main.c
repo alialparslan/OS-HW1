@@ -59,6 +59,7 @@ typedef struct{
     wchar_t wideChar;
 
     char escapes; // Stores escape status until curPos
+    int startingColumn; // Stores the length of prefix (<> )
 }shell_state;
 
 
@@ -68,7 +69,7 @@ void addChar(char ch);
 
 #define HEXCHAR(char) char & 0xff
 
-#define NEW_LINE(s) if(s->posSync && s->curColumn == 0) printf("<> "); else printf("\n\r<> ");
+#define NEW_LINE() if(state.posSync && state.curColumn == 0) printf("<> "); else printf("\n\r<> ");
 
 #define ESCAPES_BACKSPACE 0x8
 #define ESCAPES_SINGLE 0x4
@@ -120,7 +121,6 @@ int isChild = 0;
 #endif
 
 
-
 void getCursorPosition(cursor_position *cp){
     char ch;
     cp->line=0;
@@ -148,14 +148,14 @@ void dumbPrint(char* string){
     }
 }
 
-void reloadTerminalWidth(shell_state *s){
+void reloadTerminalWidth(){
     cursor_position cp;
     int saveColumn;
     getCursorPosition(&cp);
     saveColumn = cp.column;
     printf("\e[999C");
     getCursorPosition(&cp);
-    s->terminalWidth = cp.column;
+    state.terminalWidth = cp.column;
     printf("\e[%d;%dH", cp.line, saveColumn);
 }
 
@@ -194,30 +194,29 @@ int getCharWidthAndSkip(char *string, int *i){
 }
 
 
-
 // Until we are able to maintain valid cursor position after any operation this is needed.
-void updateCursorPos(shell_state *s){
+void updateCursorPos(){
     int line = 0; // Current line relative to beginning
     int column = 3;
     int i = 0;
     char ch;
     wchar_t wc;
     int width; //Width of char
-    while(i < s->curPos){
-        ch = s->content[i++];
-        width = 0; //getCharWidthAndSkip(s->content+i, &i);
+    while(i < state.curPos){
+        ch = state.content[i++];
+        width = 0; //getCharWidthAndSkip(state.content+i, &i);
         if(ch & 0x80){ //Part of multi byte character
             if(ch & 0x40){
                 //First byte of multi byte character
                 if(ch & 0x20){
                     if(ch & 0x10){ // 4 btye
-                        wc = ((ch & 0x0F)<<18) + ((s->content[i++] & 0x3F)<<12) + ((s->content[i++] & 0x3F)<<6) + (s->content[i++] & 0x3F);
+                        wc = ((ch & 0x0F)<<18) + ((state.content[i++] & 0x3F)<<12) + ((state.content[i++] & 0x3F)<<6) + (state.content[i++] & 0x3F);
                     }else{ // 3 byte
-                        wc = ((ch & 0x0F)<<12) + ((s->content[i++] & 0x3F)<<6) + (s->content[i++] & 0x3F);
+                        wc = ((ch & 0x0F)<<12) + ((state.content[i++] & 0x3F)<<6) + (state.content[i++] & 0x3F);
                     }
                 }else{
                     // 2 byte
-                    wc = ((ch & 0x1F)<<6) + (s->content[i++] & 0x3F);
+                    wc = ((ch & 0x1F)<<6) + (state.content[i++] & 0x3F);
                 }
                 width = wcwidth(wc);
                 DEBUG("wc:%d, width:%d\n", wc, width);
@@ -230,11 +229,11 @@ void updateCursorPos(shell_state *s){
             width = wcwidth(ch);
         }
         column += width;
-        if(column > s->terminalWidth){
+        if(column > state.terminalWidth){
             line++;
-            if(column > s->terminalWidth) column = width;
+            if(column > state.terminalWidth) column = width;
             else column = 0;
-        }else if(column == s->terminalWidth){
+        }else if(column == state.terminalWidth){
             line++;
             column = 0;
         }
@@ -243,18 +242,18 @@ void updateCursorPos(shell_state *s){
             column = 2;
         }
     }
-    s->curLine = line;
-    s->curColumn = column;
+    state.curLine = line;
+    state.curColumn = column;
     //DEBUG_DUMP_STATE("updateCursorPos_end");
-    s->posSync = 1;
+    state.posSync = 1;
 }
 
 //Just clears terminal does not change command in memory. printLine should be called after changes made in command
-void clearLine(shell_state *s){
+void clearLine(){
     // If curPos smaller then terminalWidth we are in first line for sure, so no need to go up or any calculation for that
-    if(s->curPos+6 > s->terminalWidth){ 
-        if(!s->posSync) updateCursorPos(s);
-        if(s->curLine > 0) printf("\e[%dA", s->curLine);  
+    if(state.curPos+6 > state.terminalWidth){ 
+        if(!state.posSync) updateCursorPos();
+        if(state.curLine > 0) printf("\e[%dA", state.curLine);  
     }else{
         DEBUG("clearLine_else: curPos < terminalWidth\n");
     }
@@ -262,146 +261,127 @@ void clearLine(shell_state *s){
 }
 
 //Assumes clearLine run before this
-void printLine(shell_state *s){
+void printLine(){
     int i;
     int l;
     int width;
-    s->curLine = 0;
-    s->curColumn = 3;
-    if(s->length > 0){
-        for(i = 0; i<s->curPos;){ // Since we need column and line until curPos, this loop goes until curPos
+    state.curLine = 0;
+    state.curColumn = 3;
+    if(state.length > 0){
+        for(i = 0; i < state.curPos;){ // Since we need column and line until curPos, this loop goes until curPos
             l = i;
-            width = getCharWidthAndSkip(s->content+i, &i);
-            if(s->content[l] == '\n'){
-                s->curLine++;
-                s->curColumn = 2;
+            width = getCharWidthAndSkip(state.content+i, &i);
+            if(state.content[l] == '\n'){
+                state.curLine++;
+                state.curColumn = 2;
                 printf("\n\r> ");
             }else{
-                while(l < i) putchar(s->content[l++]);
+                while(l < i) putchar(state.content[l++]);
             }
             
             
-            s->curColumn += width;
-            if(s->curColumn >= s->terminalWidth){
-                if(s->curColumn == s->terminalWidth){
-                    s->curColumn = 0;
-                    s->curLine++;
+            state.curColumn += width;
+            if(state.curColumn >= state.terminalWidth){
+                if(state.curColumn == state.terminalWidth){
+                    state.curColumn = 0;
+                    state.curLine++;
                     printf("a\e[D\e[K");
                 }else{
-                    s->curColumn = width;
-                    s->curLine++;
+                    state.curColumn = width;
+                    state.curLine++;
                 }
                 
             }
         }
 
-        if(i < s->length){ // If there is string after curPos
+        if(i < state.length){ // If there is string after curPos
             printf("\e7");
-            for(; i<s->length;i++) putchar(s->content[i]);
-            if(s->curPos != s->length) printf("\e8");
+            for(; i < state.length;i++) putchar(state.content[i]);
+            if(state.curPos != state.length) printf("\e8");
         }
 
     }
-    s->posSync = 1;
+    state.posSync = 1;
 }
 
 // Maybe proper way is printing whole screen from beginning.
 // curPos has to point first byte of multi byte characters in order to this func work properly.
-void reloadLine(shell_state *s){
-    s->posSync = 0;
-    clearLine(s);
-    printLine(s);
-}
-
-
-static inline void stateInit(){
-    state.content = malloc(sizeof(char) * CAPACIY_INCREMENT);
-    state.length = 0;
-    state.capacity = CAPACIY_INCREMENT;
-    state.curPos = 0;
-    state.history_pos = NULL;
-    state.history_last = NULL;
-    state.draft = 0;
-    state.width = 0;
-    state.expectedBytes = 0;
-    state.lastCharStart = 0;
-    state.escapes = 0;
-    state.curColumn = 3;
-    state.curLine =0;
+void reloadLine(){
     state.posSync = 0;
+    clearLine();
+    printLine();
 }
 
-
-void historyAdd(shell_state *s, char *command){
+void historyAdd(char *command){
     history_record *record = malloc(sizeof(history_record));
 
-    if(s->history_last) s->history_last->newer = record;
+    if(state.history_last) state.history_last->newer = record;
     record->command = command;
-    record->older = s->history_last;
+    record->older = state.history_last;
     record->newer = NULL;
-    s->history_last = record;
+    state.history_last = record;
 }
 
-void loadFromHistory(shell_state *s, history_record *record){
+void loadFromHistory(history_record *record){
     int i = 0;
 
-    if(s->length > 0){
-        if(s->history_pos == NULL){
-            s->draft = makeStr(s->content, s->length);
+    if(state.length > 0){
+        if(state.history_pos == NULL){
+            state.draft = makeStr(state.content, state.length);
             DEBUG("loadFromHistory: Content saved as draft.\n");    
         }
-        clearLine(s);
+        clearLine();
     }
-    s->history_pos = record;
-    s->curColumn = 3;
-    s->curLine = 0;
-    s->length = 0;
-    s->curPos = 0;
+    state.history_pos = record;
+    state.curColumn = 3;
+    state.curLine = 0;
+    state.length = 0;
+    state.curPos = 0;
     while(record->command[i]){
         addChar(record->command[i]);
         i++;
     }
-    s->posSync = 0;
+    state.posSync = 0;
     DEBUG_DUMP_STATE("loadFromHistory_end");
-    /*s->curPos = s->length = printf("%s", record->command);
+    /*s->curPos = state.length = printf("%s", record->command);
 
-    if(s->curPos > s->capacity){
-        free(s->content);
-        s->content = malloc(sizeof(char)*s->length);
+    if(state.curPos > state.capacity){
+        free(state.content);
+        state.content = malloc(sizeof(char)*s->length);
     }
-    memcpy(s->content, record->command, s->length);
+    memcpy(state.content, record->command, state.length);
     
-    s->posSync = 0;*/
+    state.posSync = 0;*/
 }
 
-void loadPrevious(shell_state *s){
-    if(s->history_pos){
-        if(s->history_pos->older) loadFromHistory(s, s->history_pos->older);
-    }else if(s->history_last) loadFromHistory(s, s->history_last);
+void loadPrevious(){
+    if(state.history_pos){
+        if(state.history_pos->older) loadFromHistory(state.history_pos->older);
+    }else if(state.history_last) loadFromHistory(state.history_last);
 }
 
 
-void loadNext(shell_state *s){
-    if(s->history_pos == NULL) return;
-    if(s->history_pos->newer){
-        loadFromHistory(s, s->history_pos->newer);
+void loadNext(){
+    if(state.history_pos == NULL) return;
+    if(state.history_pos->newer){
+        loadFromHistory(state.history_pos->newer);
     }else{
         // Load draft if there is one
-        if(s->length > 0) clearLine(s);
-        if(s->draft){
+        if(state.length > 0) clearLine();
+        if(state.draft){
             DEBUG("loadNext: Loading the draft.\n");
-            if(s->content) free(s->content);
-            s->content = s->draft;
-            s->draft = 0;
-            s->curPos = printf("%s", s->content);
-            s->capacity = s->curPos;
-            s->length = s->curPos;
+            if(state.content) free(state.content);
+            state.content = state.draft;
+            state.draft = 0;
+            state.curPos = printf("%s", state.content);
+            state.capacity = state.curPos;
+            state.length = state.curPos;
         }else{
-            s->length = 0;
-            s->curPos = 0;
+            state.length = 0;
+            state.curPos = 0;
         }
-        s->history_pos = NULL;
-        s->posSync = 0;
+        state.history_pos = NULL;
+        state.posSync = 0;
     }
 }
 
@@ -498,115 +478,111 @@ void addChar(char ch){
             }
         }
     }
-
-
-
 }
 
 // When curser is over a multibyte utf8 char curPos will point first char of that
 // So regardless of length of char first we decrease curPos by one
 // Then we check if we have stepped over a multibyte char and decrease until curPos points first byte of character
-void moveBackward(shell_state *s){
+void moveBackward(){
     //updateCursorPos(s);
-    if(s->curPos > 0){
-        clearLine(s);
-        while((s->content[--s->curPos] & 0xC0) == 0x80);
-        printLine(s);
+    if(state.curPos > 0){
+        clearLine();
+        while((state.content[--state.curPos] & 0xC0) == 0x80);
+        printLine();
     }
 }
 
-void moveForward(shell_state *s){
+void moveForward(){
     //updateCursorPos(s);
-    if(s->curPos < s->length){
-        clearLine(s);
-        s->curPos++;
-        while((s->content[s->curPos] & 0xC0) == 0x80) s->curPos++;
-        printLine(s);
+    if(state.curPos < state.length){
+        clearLine();
+        state.curPos++;
+        while((state.content[state.curPos] & 0xC0) == 0x80) state.curPos++;
+        printLine();
     }
 }
 
 // moves curser to end
 void goToEnd(){
     if(state.curPos < state.length){
-        clearLine(&state);
+        clearLine();
         state.curPos = state.length;
-        printLine(&state);
+        printLine();
     }
 
 }
 
 
-
-void backspace(shell_state *s){
+void backspace(){
     int i, j, x, moveBack = 0;
-    if(s->curPos > 0){
-        clearLine(s);
+    if(state.curPos > 0){
+        clearLine();
         //write(STDOUT_FILENO, "\033[1D\x1b[K\e7", 9);
         x = 1;
-        i = s->length - s->curPos;
-        s->curPos--;
-        while((s->content[s->curPos] & 0xC0) == 0x80){
-            s->curPos--;
+        i = state.length - state.curPos;
+        state.curPos--;
+        while((state.content[state.curPos] & 0xC0) == 0x80){
+            state.curPos--;
             x++;
         }
-        s->length -= x;
+        state.length -= x;
         
         for(j = 0; j < i ; j++){
-            DEBUG("Copying: %X from %d to %d\n", HEXCHAR(s->content[s->curPos+j+x]), (s->curPos)+j+x, (s->curPos)+j);
-            s->content[s->curPos+j] = s->content[s->curPos+j+x];
+            DEBUG("Copying: %X from %d to %d\n", HEXCHAR(state.content[state.curPos+j+x]), (state.curPos)+j+x, (state.curPos)+j);
+            state.content[state.curPos+j] = state.content[state.curPos+j+x];
         }
         DEBUG("moving back %d\n", moveBack);
         //if(moveBack>0) printf("\033[%dD", moveBack);
         DEBUG_DUMP_STATE("Backspace end");
-        printLine(s);
+        printLine();
     }
 }
 
-void delete(shell_state *s){
+void delete(){
     int i, j, x, moveBack = 0;
     int width;
-    if(s->curPos < s->length){
-        clearLine(s);
+    if(state.curPos < state.length){
+        clearLine();
         //write(STDOUT_FILENO, "\x1b[K", 3);
         x = 0;
-        width = getCharWidthAndSkip(s->content+s->curPos, &x);
-        //while((s->content[s->curPos+x] & 0xC0) == 0x80) x++;
+        width = getCharWidthAndSkip(state.content+state.curPos, &x);
+        //while((state.content[state.curPos+x] & 0xC0) == 0x80) x++;
         
-        i = s->length - s->curPos;
+        i = state.length - state.curPos;
         for(j = 0; j < i ; j++){
-            s->content[s->curPos+j] = s->content[s->curPos+j+x];
+            state.content[state.curPos+j] = state.content[state.curPos+j+x];
         }
         //if(moveBack>2) printf("\033[%dD", moveBack-2);
-        s->length -= x;
-        printLine(s);
+        state.length -= x;
+        printLine();
     }
 }
 
-void commit(shell_state *s){
-    if(s->length > 0){
-        if(s->curPos < s->length){
-            clearLine(s);
-            s->curPos = s->length;
-            printLine(s);
+void commit(){
+    if(state.length > 0){
+        if(state.curPos < state.length){
+            clearLine();
+            state.curPos = state.length;
+            printLine();
         }
         printf("\n\r");
-        if(s->capacity == s->length || s->capacity/s->length > 1.04){
+        if(state.capacity == state.length || state.capacity/state.length > 1.04){
             fflush(stdout);
-            s->content = realloc(s->content, sizeof(char) * (s->length+1));
+            state.content = realloc(state.content, sizeof(char) * (state.length+1));
         }
-        s->content[s->length] = '\0';
-        historyAdd(s, s->content);
-        runCommand(s->content);
-        s->content = malloc(sizeof(char) * CAPACIY_INCREMENT);
-        s->length = 0;
-        s->capacity = CAPACIY_INCREMENT;
-        s->curPos = 0;
-        s->curLine = 0;
-        s->curColumn = 3;
+        state.content[state.length] = '\0';
+        historyAdd(state.content);
+        runCommand(state.content);
+        state.content = malloc(sizeof(char) * CAPACIY_INCREMENT);
+        state.length = 0;
+        state.capacity = CAPACIY_INCREMENT;
+        state.curPos = 0;
+        state.curLine = 0;
+        state.curColumn = 3;
     }else{
-        s->curPos = 0;
+        state.curPos = 0;
     }
-    s->history_pos = 0;
+    state.history_pos = 0;
 }
 
 // Allocates new command string to command variable and returns array of pointers that points to locations in that string.
@@ -747,7 +723,7 @@ int* executeCommand(char **args, int *inputPipe){
     if(pipeOperator) args[pipeOperator] = NULL;
     if(inputPipe){
         close(STDIN_FILENO);
-        close(inputPipe[1]); // Close writing end of input pipe
+        //close(inputPipe[1]); // Close writing end of input pipe
         dup2(inputPipe[0], STDIN_FILENO);
         //close(inputPipe[0]);
     }else{
@@ -760,6 +736,8 @@ int* executeCommand(char **args, int *inputPipe){
     fclose(stderr);
     fclose(stdout);
     fclose(stdin);
+    close(outputPipe[1]);
+    close(outputPipe[0]);
     exit(0);
 }
 
@@ -842,6 +820,23 @@ void runAtExit(){
         fclose(debugFile);
     #endif
 }
+static inline void stateInit(int startingColumn){
+    state.content = malloc(sizeof(char) * CAPACIY_INCREMENT);
+    state.length = 0;
+    state.capacity = CAPACIY_INCREMENT;
+    state.curPos = 0;
+    state.history_pos = NULL;
+    state.history_last = NULL;
+    state.draft = 0;
+    state.width = 0;
+    state.expectedBytes = 0;
+    state.lastCharStart = 0;
+    state.escapes = 0;
+    state.startingColumn = startingColumn;
+    state.curColumn = startingColumn;
+    state.curLine =0;
+    state.posSync = 0;
+}
 
 int main(int argc, char *argv[]){
     struct sigaction sa; // struct for registration for resize signal
@@ -856,8 +851,7 @@ int main(int argc, char *argv[]){
         debugFile = fopen("debug.txt", "w+");
     #endif
 
-    shell_state *statePtr = &state;
-    stateInit();
+    stateInit(3);
 
     if( atexit(runAtExit) != 0){
         printf("Failed to register exit function!\n");
@@ -867,9 +861,9 @@ int main(int argc, char *argv[]){
     enableRawMode();
     system("clear");
     write(STDOUT_FILENO, "\x1b[2J", 4);
-    reloadTerminalWidth(statePtr);
+    reloadTerminalWidth();
     printf("Welcome to AlpShell - Press CTRL-D to quit");
-    NEW_LINE(statePtr);
+    NEW_LINE();
 
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
@@ -884,7 +878,7 @@ int main(int argc, char *argv[]){
 
         if(escapeSequence == 3){
             if(ch == '~'){
-                delete(statePtr);
+                delete();
                 processed = 1;
             }else{
                 processed = 0;
@@ -898,16 +892,16 @@ int main(int argc, char *argv[]){
                     escapeSequence++;
                     break;
                 case 'A': // Upward arrow
-                    loadPrevious(statePtr);
+                    loadPrevious();
                     break;
                 case 'B': // Downward arrow
-                    loadNext(statePtr);
+                    loadNext();
                     break;
                 case 'C': // Right arrow
-                    moveForward(statePtr);
+                    moveForward();
                     break;
                 case 'D': // left
-                    moveBackward(statePtr);
+                    moveBackward();
                     break;
                 default:
                     //printf("[");
@@ -938,7 +932,7 @@ int main(int argc, char *argv[]){
                     state.curColumn = 3;
                     state.history_pos = NULL;
                     printf("^C");
-                    NEW_LINE(statePtr);
+                    NEW_LINE();
                     break;
                 case 4: // CTRL-D
                     exit(1);
@@ -948,15 +942,15 @@ int main(int argc, char *argv[]){
                     if(escapes){
                         addChar('\n');
                     }else{
-                        commit(statePtr);
-                        NEW_LINE(statePtr);
+                        commit();
+                        NEW_LINE();
                     }
                     break;
                 case 27: // ESC
                     escapeSequence = 1;
                     break;
                 case 127: // backspace
-                    backspace(statePtr);
+                    backspace();
                     break;
                 default:
                     //printf("(C:%d)",ch);
@@ -986,7 +980,7 @@ int main(int argc, char *argv[]){
 
         //We need to do this here to avoid inturrupting multibyte char sequences
         if(resizeOccured && !state.expectedBytes){
-            reloadTerminalWidth(statePtr);
+            reloadTerminalWidth();
             //reloadLine(statePtr);
             resizeOccured = 0;
         }
