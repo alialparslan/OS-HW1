@@ -11,14 +11,15 @@
 #include <sys/wait.h> 
 #include <signal.h>
 #include <errno.h>
-#include <sys/stat.h> // open
-#include <fcntl.h> // open
+#include <sys/stat.h>
+#include <fcntl.h> 
+#include <sys/ioctl.h>
 
 #define CAPACIY_INCREMENT 10
 
 #define DEBUG_ENABLED 0 // Enables or disables debug output globally
 
-#define JUST_ECHO 0 // If it is 1 just echos back command
+#define JUST_ECHO 0 // If it is 1 just echos back command instead of running it
 
 #define ADJUST_CAPACITY(array, count, minFree ,elementSize) \
     if( (count+minFree) % CAPACIY_INCREMENT == 0) \
@@ -36,13 +37,14 @@ typedef struct history_record{
     char *command;
 }history_record;
 
+// Current command usually referred as current line even though it may consists of multiple line
 
 typedef struct{
     int terminalWidth; // How many columns terminal has
     //command_history history;
     history_record *history_last;
     history_record *history_pos; // 0 if current command is not loaded from history otherwise last loaded command's index in history
-    char *content;
+    char *content; // Current command
     int length; // length of current content in bytes
     int capacity; // Array capacity in bytes
     int curPos; // Points the character that cursor is currently over (First byte for multibytes) or length if it is at end of the line
@@ -58,6 +60,7 @@ typedef struct{
     int expectedBytes; // How many bytes expected to complate multi byte char
     wchar_t wideChar;
 
+    char* cwd; // Current working directory
     int startingColumn; // Stores the length of prefix (<> )
 }shell_state;
 
@@ -66,21 +69,17 @@ void runCommand(char *command);
 void addChar(char ch);
 void enableRawMode();
 void disableRawMode();
-
+void updateCursorPos();
 
 #define HEXCHAR(char) char & 0xff
 
-#define NEW_LINE() if(state.posSync && state.curColumn == 0) printf("<> "); else printf("\n\r<> ");
+#define NEW_LINE() printf("\n\r\x1b[36m<%s>\x1b[0m ",state.cwd); \
+    state.curLine = state.startingColumn/state.terminalWidth; \
+    state.curColumn = state.startingColumn %state.terminalWidth;
 
 #define ESCAPES_BACKSPACE 0x8
 #define ESCAPES_SINGLE 0x4
 #define ESCAPES_DOUBLE 0x2
-#define ESCAPES_CHECK_BACKSPACE(var) var & 0x8
-#define ESCAPES_CLEAR_BACKSPACE(var) var = var & 0x7
-#define ESCAPES_CHECK_SINGLE(var) var & 0x4
-#define ESCAPES_CLEAR_SINGLE(var) var = var & 0xB
-#define ESCAPES_CHECK_DOUBLE(var) var & 0x2
-#define ESCAPES_CLEAR_DOUBLE(var) var = var & 0xD
 
 // Globals
 struct termios termios_config;
@@ -149,14 +148,21 @@ void dumbPrint(char* string){
 }
 
 void reloadTerminalWidth(){
-    cursor_position cp;
+    struct winsize w;
     int saveColumn;
-    getCursorPosition(&cp);
-    saveColumn = cp.column;
-    printf("\e[999C");
-    getCursorPosition(&cp);
-    state.terminalWidth = cp.column;
-    printf("\e[%d;%dH", cp.line, saveColumn);
+    cursor_position cp;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1 || w.ws_col == 0) {
+        getCursorPosition(&cp);
+        saveColumn = cp.column;
+        printf("\e[999C");
+        getCursorPosition(&cp);
+        state.terminalWidth = cp.column;
+        printf("\e[%d;%dH", cp.line, saveColumn);
+        DEBUG("reloadTerminalWidth: ioctl failed!\n");
+    }else{
+    state.terminalWidth = w.ws_col;
+    }
+    updateCursorPos();
 }
 
 //Returns how much space given character takes in terminal
@@ -196,8 +202,8 @@ int getCharWidthAndSkip(char *string, int *i){
 
 // Until we are able to maintain valid cursor position after any operation this is needed.
 void updateCursorPos(){
-    int line = 0; // Current line relative to beginning
-    int column = 3;
+    int line = state.startingColumn/state.terminalWidth; // Current line relative to beginning
+    int column = state.startingColumn %state.terminalWidth;
     int i = 0;
     char ch;
     wchar_t wc;
@@ -244,7 +250,6 @@ void updateCursorPos(){
     }
     state.curLine = line;
     state.curColumn = column;
-    //DEBUG_DUMP_STATE("updateCursorPos_end");
     state.posSync = 1;
 }
 
@@ -252,7 +257,16 @@ void updateCursorPos(){
 void clearLine(){    
     if(!state.posSync) updateCursorPos();
     if(state.curLine > 0) printf("\e[%dA", state.curLine);  
-    printf("\e[999D\e[J<> ");
+    printf("\e[999D\e[J\x1b[36m<%s>\x1b[0m ", state.cwd);
+}
+
+void updateCWD(){
+    int i = 0;
+    int width = 3;
+    if(state.cwd) free(state.cwd);
+    state.cwd = getcwd(NULL,0);
+    while(state.cwd[i]) width += getCharWidthAndSkip(state.cwd, &i);
+    state.startingColumn = width;
 }
 
 //Assumes clearLine run before this
@@ -260,8 +274,8 @@ void printLine(){
     int i;
     int l;
     int width;
-    state.curLine = 0;
-    state.curColumn = state.startingColumn;
+    state.curLine = state.startingColumn/state.terminalWidth;
+    state.curColumn = state.startingColumn %state.terminalWidth;
     if(state.length > 0){
         for(i = 0; i < state.curPos;){ // Since we need column and line until curPos, this loop goes until curPos
             l = i;
@@ -768,6 +782,9 @@ void runCommand(char *command){
         if(chdir(args[1]) < 0){
             printf("Error: %s!", strerror(errno));
         }
+        updateCWD();
+        free(tempCommandStr);
+        free(args);
         return;
     }
     disableRawMode();
@@ -837,7 +854,9 @@ void runAtExit(){
     #endif
 }
 
-static inline void stateInit(int startingColumn){
+static inline void stateInit(){
+    state.cwd = 0;
+    updateCWD();
     state.content = malloc(sizeof(char) * CAPACIY_INCREMENT);
     state.length = 0;
     state.capacity = CAPACIY_INCREMENT;
@@ -848,10 +867,10 @@ static inline void stateInit(int startingColumn){
     state.width = 0;
     state.expectedBytes = 0;
     state.lastCharStart = 0;
-    state.startingColumn = startingColumn;
-    state.curColumn = startingColumn;
+    state.curColumn = state.startingColumn;
     state.curLine =0;
     state.posSync = 0;
+   
 }
 
 int main(int argc, char *argv[]){
@@ -943,8 +962,6 @@ int main(int argc, char *argv[]){
                     goToEnd();
                     state.length = 0;
                     state.curPos = 0;
-                    state.curLine = 0;
-                    state.curColumn = 3;
                     state.history_pos = NULL;
                     printf("^C");
                     NEW_LINE();
